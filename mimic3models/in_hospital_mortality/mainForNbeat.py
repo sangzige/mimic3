@@ -113,6 +113,7 @@ args_dict['target_repl'] = target_repl
 # 里面存放的是train和test中的csv，可能处理掉了小部分
 train_raw = utils.load_data(train_reader, discretizer, normalizer, args.small_part)
 val_raw = utils.load_data(val_reader, discretizer, normalizer, args.small_part)
+
 #因为这里预测的是生理指标，因此y不是01，而是后16h的数据情况，因此这里要重新划分数据集 physiological 表示
 
 # Build the model
@@ -133,13 +134,19 @@ if args.task== 'ihm':
     forecast_length = 1
     sample_x = val_raw[0][sample_idx:sample_idx + 1]
     sample_y = val_raw[1][sample_idx]
+    phy_type=18
     # tmp_x = torch.tensor((10000, 48*76))
     # tmp_y = torch.tensor((10000, 1))
 elif args.task== 'phy':
+    # train_raw = torch.rand(14000, 48, 76)
+    # val_raw = torch.rand(32000, 48, 76)
     backcast_length = 32 * 76
     forecast_length = 16 * 76
-    train_phy = train_raw[0]
-    val_phy = val_raw[0]
+    # train_phy = train_raw[0]
+    # val_phy = val_raw[0]
+    # 这里有点问题，数据处理完是48*76，但是y应该是bs，16，18
+    train_phy = torch.rand(14000, 48, 76)
+    val_phy = torch.rand(3200, 48, 18)
     split_timesteps = 32
     # 划分训练集和测试集
     phy_train_x = train_phy[:, :split_timesteps, :]
@@ -148,11 +155,11 @@ elif args.task== 'phy':
     phy_val_y = val_phy[:, split_timesteps:, :]
     sample_x = val_phy[sample_idx:sample_idx + 1]
     sample_y = val_phy[sample_idx]
-
+    phy_type=18
 model = NBeatsPytorch(
         backcast_length=backcast_length, forecast_length=forecast_length,
         stack_types=(GENERIC_BLOCK, TREND_BLOCK, SEASONALITY_BLOCK),
-        nb_blocks_per_stack=2, thetas_dim=(4, 4, 4), hidden_layer_units=20
+        nb_blocks_per_stack=2, thetas_dim=(4, 4, 4), hidden_layer_units=20,phy_type=phy_type,phy_forecast=16*76
     )
 backend_name = NBeatsPytorch.name()
 suffix = ".bs{}{}{}.ts{}{}".format(args.batch_size,
@@ -176,9 +183,9 @@ if args.load_state != "":
 if args.mode == 'train':
     # 现在要调整nbeat中，模型的结构，修改其输出，使得全连接层能够接受
     if args.task =='phy':
-        model.fit(phy_train_x, phy_train_y, validation_data=(phy_val_x, phy_val_y), epochs=1, batch_size=32)
+        model.fit(phy_train_x, phy_train_y, validation_data=(phy_val_x, phy_val_y), epochs=1, batch_size=32, task='phy')
     elif args.task == 'ihm':
-        model.fit(train_raw[0], train_raw[1], validation_data=(val_raw[0], val_raw[1]), epochs=1, batch_size=32)
+        model.fit(train_raw[0], train_raw[1], validation_data=(val_raw[0], val_raw[1]), epochs=1, batch_size=32, task='ihm')
 
     model.enable_intermediate_outputs()
     model.predict(sample_x)  # load intermediary outputs into our model object.

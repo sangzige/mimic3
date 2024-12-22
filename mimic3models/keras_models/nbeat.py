@@ -26,7 +26,9 @@ class NBeatsNet(nn.Module):
             thetas_dim=(4, 8),
             share_weights_in_stack=False,
             hidden_layer_units=256,
-            nb_harmonics=None
+            nb_harmonics=None,
+            phy_type=18,
+            phy_forecast=16*76
     ):
         super(NBeatsNet, self).__init__()
         self.forecast_length = forecast_length
@@ -50,6 +52,15 @@ class NBeatsNet(nn.Module):
         self._gen_intermediate_outputs = False
         self._intermediary_outputs = []
 
+        self.phy_forecast=phy_forecast
+        self.phy_type = phy_type
+        self.phy_classification = []
+        for phy_id in range(self.phy_type):
+            # 18种按照顺序对应
+            self.phy_classification.append(self.create_fc(phy_id))
+    def create_fc(self, phy_id):
+        fc = nn.Linear(self.phy_forecast, 16)
+        return fc
     def create_stack(self, stack_id):
         stack_type = self.stack_types[stack_id]
         print(f'| --  Stack {stack_type.title()} (#{stack_id}) (share_weights_in_stack={self.share_weights_in_stack})')
@@ -118,7 +129,7 @@ class NBeatsNet(nn.Module):
         self._opt = opt_
         self._loss = loss_
 
-    def fit(self, x_train, y_train, validation_data=None, epochs=10, batch_size=32):
+    def fit(self, x_train, y_train, validation_data=None, epochs=10, batch_size=32, task='ihm'):
 
         def split(arr, size):
             arrays = []
@@ -136,6 +147,7 @@ class NBeatsNet(nn.Module):
             shuffled_indices = list(range(len(x_train_list)))
             random.shuffle(shuffled_indices)
             self.train()
+            # 在生理指标中，是多任务，也就是要计算15个子任务的loss
             train_loss = []
             timer = time()
             for batch_id in shuffled_indices:
@@ -143,7 +155,14 @@ class NBeatsNet(nn.Module):
                 self._opt.zero_grad()
                 # 隐式地调用了模型的forward方法，传入当前批次的输入数据（转换为 PyTorch 的张量并移动到指定的设备上
                 _, forecast = self(torch.tensor(batch_x, dtype=torch.float).to(self.device))
-                loss = self._loss(forecast, squeeze_last_dim(torch.tensor(batch_y, dtype=torch.float).to(self.device)))
+                # 对不同任务，得到forecast后有不同的处理，生理指标得到以后还要接着过全连接层
+                if task == 'ihm':
+                    loss = self._loss(forecast, squeeze_last_dim(torch.tensor(batch_y, dtype=torch.float).to(self.device)))
+                elif task=='phy':
+                    for phy_id in range(self.phy_type):
+                        result=self.phy_classification[phy_id](forecast)
+                        loss += self._loss(result,
+                                          squeeze_last_dim(torch.tensor(batch_y[:,:,phy_id], dtype=torch.float).to(self.device)))
                 train_loss.append(loss.item())
                 loss.backward()
                 self._opt.step()
@@ -155,7 +174,15 @@ class NBeatsNet(nn.Module):
                 x_test, y_test = validation_data
                 self.eval()
                 _, forecast = self(torch.tensor(x_test, dtype=torch.float).to(self.device))
-                test_loss = self._loss(forecast, squeeze_last_dim(torch.tensor(y_test, dtype=torch.float))).item()
+                # 也是要按照任务进行区分，计算loss
+                if task == 'ihm':
+                    test_loss = self._loss(forecast, squeeze_last_dim(torch.tensor(y_test, dtype=torch.float).to(self.device)))
+                elif task=='phy':
+                    for phy_id in range(self.phy_type):
+                        result=self.phy_classification[phy_id](forecast)
+                        test_loss += self._loss(result,
+                                          squeeze_last_dim(torch.tensor(y_test[:,:,phy_id], dtype=torch.float).to(self.device)))
+                # test_loss = self._loss(forecast, squeeze_last_dim(torch.tensor(y_test, dtype=torch.float))).item()
 
             num_samples = len(x_train_list)
             time_per_step = int(elapsed_time / num_samples * 1000)
@@ -186,6 +213,7 @@ class NBeatsNet(nn.Module):
         return g_pred, i_pred, outputs
 
     def forward(self, backcast):
+        # 这个是nbeat的forward，在nbeat计算完以后，将其结果再送入各个子全连接层中，计算结果
         self._intermediary_outputs = []
         backcast = squeeze_last_dim(backcast)
         forecast = torch.zeros(size=(backcast.size()[0], self.forecast_length,))  # maybe batch size here.
@@ -203,8 +231,12 @@ class NBeatsNet(nn.Module):
 
 
 def squeeze_last_dim(tensor):
-    if len(tensor.shape) == 3 and tensor.shape[-1] == 1:  # (128, 10, 1) => (128, 10).
-        return tensor[..., 0]
+    # 数据是三维的，因此送入全连接层要把后面两维展平
+    if len(tensor.shape) == 3 :  # (128, 10, 1) => (128, 10).
+        return tensor.view(tensor.size(0), -1)
+        # return tensor[..., 0]
+    # if len(tensor.shape) == 3 and tensor.shape[-1] == 1:  # (128, 10, 1) => (128, 10).
+        # return tensor[..., 0]
     return tensor
 
 
@@ -220,6 +252,7 @@ def seasonality_model(thetas, t, device):
 
 def trend_model(thetas, t, device):
     p = thetas.size()[-1]
+    # t的跨度反而没影响，反而是thetas不能太大，要不然多项式要计算很多个n次方
     assert p <= 4, 'thetas_dim is too big.'
     T = torch.tensor(np.array([t ** i for i in range(p)])).float()
     return thetas.mm(T.to(device))
